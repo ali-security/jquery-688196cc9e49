@@ -2757,7 +2757,7 @@ QUnit.test( "Sanitized HTML doesn't get unsanitized", function( assert ) {
 	var container,
 		counter = 0,
 		oldIos = /iphone os (?:8|9|10|11|12)_/i.test( navigator.userAgent ),
-		assertCount = oldIos ? 11 : 12,
+		assertCount = oldIos ? 12 : 13,
 		done = assert.async( assertCount );
 
 	assert.expect( assertCount );
@@ -2799,11 +2799,13 @@ QUnit.test( "Sanitized HTML doesn't get unsanitized", function( assert ) {
 	test( "<img alt=\"<x\" title=\"\" src=\"/><img src=url404 onerror=xss(9)>\">" );
 	test( "<noscript/><img src=url404 onerror=xss(10)>" );
 
+	test( "<option><style></option></select><img src=url404 onerror=xss(11)></style>" );
+
 	// Support: iOS 8 - 12 only.
 	// Old iOS parses `<noembed>` tags differently, executing this code. This is no
 	// different to native behavior on that OS, though, so just accept it.
 	if ( !oldIos ) {
-		test( "<noembed><noembed/><img src=url404 onerror=xss(11)>" );
+		test( "<noembed><noembed/><img src=url404 onerror=xss(12)>" );
 	}
 } );
 
@@ -2846,5 +2848,49 @@ QUnit.test( "Sanitized HTML doesn't get unsanitized by other manipulation method
 
 	jQuery.each( methods, function( index, method ) {
 		test( method );
+	} );
+} );
+
+QUnit.test( "HTML with <option> tags isn't parsed in a <select> context", function( assert ) {
+
+	// Parsing <option> markup inside a <select> wrapper changes the resulting DOM
+	// compared to innerHTML and can turn sanitized HTML into unsafe one. The nested
+	// <select> below closes the wrapper, so any wrapping is visible in the output.
+	var html = "<option><select><option>x</option></select></option>",
+		reference = document.createElement( "div" ),
+		parsed, expected;
+
+	// Support: IE <=9 only
+	// IE <=9 replaces <option> tags with their contents outside of a select element,
+	// so jQuery needs to wrap them there.
+	reference.innerHTML = "<option></option>";
+	if ( !reference.lastChild ) {
+		assert.expect( 1 );
+		assert.ok( true, "<option> tags need a <select> wrapper in this browser" );
+		return;
+	}
+
+	reference.innerHTML = html;
+	parsed = reference.innerHTML;
+	expected = {
+		html: "<span>" + parsed + "</span>",
+		append: "<span>" + parsed + "</span>",
+		prepend: "<span>" + parsed + "</span>",
+		before: parsed + "<span></span>",
+		after: "<span></span>" + parsed,
+		replaceWith: parsed
+	};
+
+	assert.expect( 7 );
+
+	assert.equal( jQuery( "<div></div>" ).append( jQuery( html ) ).html(), parsed,
+		"jQuery(): <option> markup parsed like with innerHTML" );
+
+	jQuery.each( expected, function( method, result ) {
+		var div = jQuery( "<div><span></span></div>" );
+
+		div.children( "span" )[ method ]( html );
+		assert.equal( div.html(), result,
+			method + "(): <option> markup parsed like with innerHTML" );
 	} );
 } );
