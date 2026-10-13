@@ -1,0 +1,162 @@
+name: Seal build (jquery npm package)
+
+# Pack-only rebuild of the jquery npm tarball. Tests run on Travis (.travis.yml).
+#
+# jQuery 3.x is not published by `npm pack` of this repo: build/release.js runs
+# grunt (default + slim custom build), then build/release/dist.js copies the
+# release files into the separate jquery/jquery-dist repo (keeping that repo's
+# own README.md), writes bower.json and publishes from there. This workflow
+# replays exactly that, inside node:0.10 (npm 2.15.1, the publishing toolchain).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and pack jquery-3.0.0.tgz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # jquery-dist master just before the "Release 3.0.0" commit
+      # (tag 3.0.0-rc1); supplies the published README.md.
+      JQUERY_DIST_REF: e503a93188dc4b5b42e2340f805f2d90b404bc50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write container build script
+        run: |
+          mkdir -p "$RUNNER_TEMP/seal"
+          cat > "$RUNNER_TEMP/seal/build.sh" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          # Hand everything back to the runner user, whatever happens.
+          fix_owner() {
+            chown -R "$HOST_UID:$HOST_GID" /work /distpkg
+          }
+          trap fix_owner EXIT
+
+          # build.js appends $COMMIT to the version string.
+          unset COMMIT
+
+          echo "node $(node --version), npm $(npm --version)"
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken 2016-06-09T18:33:13.420Z
+          npm config set always-auth true
+
+          cd /work
+
+          ok=0
+          for attempt in 1 2 3; do
+            if npm install; then
+              ok=1
+              break
+            fi
+            echo "npm install attempt $attempt failed"
+            rm -rf node_modules
+            sleep 15
+          done
+          if [ "$ok" != 1 ]; then
+            echo "npm install failed after 3 attempts"
+            exit 1
+          fi
+
+          # The only non-determinism: @DATE is stamped with the current time.
+          # Read it from SEAL_BUILD_DATE instead, set per grunt run below to the
+          # values in the 3.0.0 release headers (full build 18:02Z, slim 18:03Z).
+          sed -i 's|\.replace( /@DATE/g, .*$|.replace( /@DATE/g, process.env.SEAL_BUILD_DATE );|' build/tasks/build.js
+          grep -n 'process.env.SEAL_BUILD_DATE' build/tasks/build.js
+
+          # The release built from a tree whose src/core.js still carried
+          # "@VERSION" (release.js _setSrcVersion() substitutes it only after
+          # generateArtifacts()). The tag commits the substituted file, so
+          # restore the placeholder for the build -- the slim build appends the
+          # excluded-module list to @VERSION -- and substitute it back afterwards.
+          sed -i 's|^\tversion = "3\.0\.0",$|\tversion = "@VERSION",|' src/core.js
+          grep -n '"@VERSION"' src/core.js
+
+          # Same commands as build/release.js generateArtifacts().
+          SEAL_BUILD_DATE=2016-06-09T18:02Z ./node_modules/.bin/grunt
+          SEAL_BUILD_DATE=2016-06-09T18:03Z ./node_modules/.bin/grunt custom:-ajax,-effects,-deprecated --filename=jquery.slim.js
+          ./node_modules/.bin/grunt remove_map_comment --filename=jquery.slim.js
+
+          # release.js _setSrcVersion()
+          sed -i 's|@VERSION|3.0.0|g' src/core.js
+          if ! git diff --quiet -- src/core.js; then
+            git --no-pager diff -- src/core.js
+            echo "src/core.js was not restored to the 3.0.0 release content"
+            exit 1
+          fi
+
+          # Reproducibility report: the unpatched tree rebuilds dist/ byte-identical
+          # to the tag's release files. Seal security patches change src/, so the
+          # rebuilt dist/ legitimately differs from the committed (stale) copies;
+          # list what changed instead of failing.
+          git config --global core.fileMode false
+          git --no-pager diff --stat -- dist/
+
+          # Replicate build/release/dist.js copy() into the jquery-dist checkout.
+          cd /distpkg
+          find . -mindepth 1 -maxdepth 1 ! -name README.md ! -name '.*' -exec rm -rf {} +
+          mkdir -p dist external
+          for f in dist/jquery.js dist/jquery.min.js dist/jquery.min.map \
+                   dist/jquery.slim.js dist/jquery.slim.min.js dist/jquery.slim.min.map \
+                   src/core.js; do
+            cp -f "/work/$f" dist/
+          done
+          cp -rf /work/external/sizzle external/
+          for f in src LICENSE.txt AUTHORS.txt package.json; do
+            cp -rf "/work/$f" .
+          done
+          rm -f src/wrapper.js
+          node -e '
+            var pkg = require("/work/package.json");
+            require("fs").writeFileSync("/distpkg/bower.json", JSON.stringify({
+              name: pkg.name,
+              main: pkg.main,
+              license: "MIT",
+              ignore: [ "package.json" ],
+              keywords: pkg.keywords
+            }, null, 2));
+          '
+          # Nothing from the clone's VCS metadata may influence npm pack.
+          rm -rf .git .gitignore .npmignore
+          find . -type f | sort
+
+          chown -R "$HOST_UID:$HOST_GID" /distpkg /work
+          rm -rf /work/seal-out
+          mkdir -p /work/seal-out
+          cd /work/seal-out
+          npm pack /distpkg
+          ls -l /work/seal-out
+          EOF
+          chmod +x "$RUNNER_TEMP/seal/build.sh"
+
+      - name: Clone jquery-dist at the pre-release commit
+        run: |
+          git clone https://github.com/jquery/jquery-dist.git "$RUNNER_TEMP/distpkg"
+          git -C "$RUNNER_TEMP/distpkg" checkout --detach "$JQUERY_DIST_REF"
+          git -C "$RUNNER_TEMP/distpkg" log -1 --format='%H %s'
+
+      - name: Build, assemble and pack in node:0.10
+        run: |
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -v "$RUNNER_TEMP/seal":/seal \
+            -v "$RUNNER_TEMP/distpkg":/distpkg \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            node:0.10 bash /seal/build.sh
+          test -f seal-out/jquery-3.0.0.tgz
+          tar tzf seal-out/jquery-3.0.0.tgz | sort
+          sha256sum seal-out/jquery-3.0.0.tgz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jquery-3.0.0
+          path: seal-out/jquery-3.0.0.tgz
+          if-no-files-found: error
