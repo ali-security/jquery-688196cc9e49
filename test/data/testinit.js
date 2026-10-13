@@ -251,8 +251,8 @@ this.testIframe = function( title, fileName, func ) {
 				done();
 			} );
 		};
-		iframe = jQuery( "<div/>" ).css( { position: "absolute", width: "500px", left: "-600px" } )
-			.append( jQuery( "<iframe/>" ).attr( "src", url( "./data/" + fileName ) ) )
+		iframe = jQuery( "<div></div>" ).css( { position: "absolute", width: "500px", left: "-600px" } )
+			.append( jQuery( "<iframe></iframe>" ).attr( "src", url( "./data/" + fileName ) ) )
 			.appendTo( "#qunit-fixture" );
 	} );
 };
